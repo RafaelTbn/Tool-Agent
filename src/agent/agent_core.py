@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
-from .decision_engine import Decision, DecisionEngine
+from .decision_engine import DecisionEngine
 
 
 LoggerFn = Callable[[str, Dict[str, Any]], None]
@@ -47,16 +47,13 @@ class ToolEnabledAgent:
             {"query": query, "action": decision.action, "reason": decision.reason},
         )
 
+        forced_refusal: Optional[str] = None
         if decision.action == "guardrail_refuse":
-            refusal = self._response(
-                status="refused",
-                decision=decision.action,
-                message="Request refused due to unsafe intent.",
-            )
-            self._log("refusal_decision", refusal)
-            return refusal
+            forced_refusal = "Request refused due to unsafe intent."
+            answer = forced_refusal
+            self._log("refusal_decision", {"decision": decision.action, "message": answer})
 
-        if decision.action == "structured_data_tool":
+        elif decision.action == "structured_data_tool":
             tool_input = {"query": query}
             self._log("tool_input", {"tool": "structured_data_tool", "input": tool_input})
             tool_output = self._deps.structured_data_tool(tool_input)
@@ -80,6 +77,16 @@ class ToolEnabledAgent:
         }
         risk = self._deps.guardrail_tool(risk_input)
         self._log("risk_evaluated", {"input": risk_input, "result": risk})
+
+        if forced_refusal is not None:
+            refusal = self._response(
+                status="refused",
+                decision=decision.action,
+                message=forced_refusal,
+                risk=risk,
+            )
+            self._log("final_response", refusal)
+            return refusal
 
         if risk.get("status") == "refused":
             refusal = self._response(
