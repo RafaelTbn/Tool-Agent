@@ -1,0 +1,7 @@
+# Tool-enabled AI Agent simulation
+# Python 3.10+
+
+fastapi
+uvicorn
+pydantic
+request
