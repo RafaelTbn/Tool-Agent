@@ -61,7 +61,7 @@ class ExternalAPITool:
                 retries=max_retries,
                 on_retry=self._on_retry,
             )
-        except Exception as exc:  # noqa: BLE001 - intentional safe fallback.
+        except Exception as exc: 
             return {
                 "status": "fallback",
                 "message": "External system unavailable. Please retry later.",

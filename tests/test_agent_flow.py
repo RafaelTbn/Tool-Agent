@@ -36,6 +36,7 @@ class AgentFlowTests(unittest.TestCase):
                 structured_data_tool=lambda p: {"status": "ok", "message": "structured-ok"},
                 external_api_tool=lambda p: {"status": "ok", "message": "external-ok"},
                 guardrail_tool=self.guardrail.run,
+                fallback_lookup_tool=lambda p: {"status": "error", "message": "no-match", "data": {}},
                 logger=lambda e, p: self.logs.append((e, p)),
             )
         )
@@ -57,6 +58,32 @@ class AgentFlowTests(unittest.TestCase):
         self.assertEqual(result["decision"], "guardrail_refuse")
         self.assertIn("unsafe intent", result["message"].lower())
         self.assertIn("risk", result)
+
+    def test_handle_query_direct_answer_uses_contextual_lookup_when_available(self) -> None:
+        agent = ToolEnabledAgent(
+            AgentDependencies(
+                structured_data_tool=lambda p: {"status": "ok", "message": "structured-ok"},
+                external_api_tool=lambda p: {"status": "ok", "message": "external-ok"},
+                guardrail_tool=self.guardrail.run,
+                fallback_lookup_tool=lambda p: {
+                    "status": "ok",
+                    "message": "fallback-hit",
+                    "data": {
+                        "source": "sla_lookup",
+                        "record": {"service_name": "Premium Support", "response_time": "1 hour"},
+                        "score": 4,
+                    },
+                },
+                contextual_answer=lambda query, data: (
+                    f"{data['record']['service_name']} responds in {data['record']['response_time']}."
+                ),
+                logger=lambda e, p: self.logs.append((e, p)),
+            )
+        )
+        result = agent.handle_query("How fast is Premium Support?")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["decision"], "direct_answer")
+        self.assertIn("1 hour", result["message"])
 
 
 if __name__ == "__main__":

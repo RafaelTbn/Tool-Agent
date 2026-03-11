@@ -20,22 +20,9 @@ class DecisionEngine:
     behavior deterministic for production simulation requirements.
     """
 
-    _RISK_KEYWORDS = ("delete", "bypass", "drop", "shutdown", "override")
-    _STRUCTURED_KEYWORDS = (
-        "sla",
-        "policy",
-        "account status",
-        "internal database",
-        "service name",
-        "role",
-    )
-    _EXTERNAL_KEYWORDS = (
-        "system load",
-        "external",
-        "latency",
-        "uptime",
-        "health check",
-    )
+    _RISK_KEYWORDS = ("delete", "bypass", "drop", "disable security", "wipe", "override", "admin access", "production access", "shutdown")
+    _STRUCTURED_KEYWORDS = ("sla","policy", "account status", "internal database", "service name", "role",)
+    _EXTERNAL_KEYWORDS = ("system load","external","latency","uptime","health check",)
 
     def decide(self, query: str) -> Decision:
         """Return deterministic action based on query content."""
@@ -58,7 +45,7 @@ class DecisionEngine:
                 action="external_api_tool",
                 reason="Query requests external system information.",
             )
-
+#llm layer 
         return Decision(
             action="direct_answer",
             reason="No tool requirement detected from deterministic rules.",

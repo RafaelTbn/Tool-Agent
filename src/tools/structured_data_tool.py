@@ -1,113 +1,96 @@
-"""Deterministic structured-data query tool."""
+"""Deterministic structured-data query tool backed by live PostgreSQL."""
 
 from __future__ import annotations
 
+import os
 import re
-from pathlib import Path
 from typing import Any, Dict, List
 
 
 class StructuredDataTool:
-    """Simulates internal database/policy/SLA lookups."""
-
-    _SLA: Dict[str, Dict[str, Any]] = {
-        "basic support": {
-            "service_name": "Basic Support",
-            "tier": "Basic",
-            "response_time": "24 hours",
-            "resolution_time": "3 business days",
-            "availability": "Business hours (09:00-18:00)",
-            "support_channels": ["Email"],
-            "escalation_available": False,
-        },
-        "premium support": {
-            "service_name": "Premium Support",
-            "tier": "Premium",
-            "response_time": "1 hour",
-            "resolution_time": "8 hours",
-            "availability": "24/7",
-            "support_channels": ["Email", "Phone", "Chat"],
-            "escalation_available": True,
-        },
-        "enterprise support": {
-            "service_name": "Enterprise Support",
-            "tier": "Enterprise",
-            "response_time": "15 minutes",
-            "resolution_time": "4 hours",
-            "availability": "24/7 with dedicated manager",
-            "support_channels": ["Dedicated Hotline", "Priority Email"],
-            "escalation_available": True,
-        },
-    }
-
-    _ACCOUNTS: Dict[str, Dict[str, Any]] = {
-        "1001": {
-            "user_id": "1001",
-            "name": "Alice Tan",
-            "role": "Employee",
-            "status": "Active",
-            "service_plan": "Basic Support",
-            "last_login": "2026-02-17T10:15:00Z",
-        },
-        "1002": {
-            "user_id": "1002",
-            "name": "Brian Lim",
-            "role": "Manager",
-            "status": "Active",
-            "service_plan": "Premium Support",
-            "last_login": "2026-02-17T08:22:00Z",
-        },
-        "1003": {
-            "user_id": "1003",
-            "name": "Clara Wijaya",
-            "role": "Admin",
-            "status": "Suspended",
-            "service_plan": "Enterprise Support",
-            "last_login": "2026-02-10T19:03:00Z",
-        },
-    }
-
-    _POLICIES: List[Dict[str, Any]] = [
-        {
-            "policy_id": "POL-001",
-            "title": "Access Control Policy",
-            "category": "Security",
-            "role_scope": ["Employee", "Manager", "Admin"],
-        },
-        {
-            "policy_id": "POL-002",
-            "title": "Data Deletion Policy",
-            "category": "Compliance",
-            "role_scope": ["Admin"],
-        },
-        {
-            "policy_id": "POL-003",
-            "title": "Incident Escalation Policy",
-            "category": "Operations",
-            "role_scope": ["Support", "Manager"],
-        },
-    ]
+    """Query internal SLA/policy/account data from live PostgreSQL."""
 
     def __init__(self) -> None:
-        self._sla = dict(self._SLA)
-        self._accounts = dict(self._ACCOUNTS)
-        self._policies = [dict(policy) for policy in self._POLICIES]
-        self._load_from_seed_sql()
+        self._db_dsn = os.getenv("DATABASE_URL", "").strip()
+        self._db_host = os.getenv("DB_HOST", "localhost").strip()
+        self._db_port = int(os.getenv("DB_PORT", "5432").strip() or "5432")
+        self._db_name = os.getenv("DB_NAME", "tool_agent").strip()
+        self._db_user = os.getenv("DB_USER", "tool_user").strip()
+        self._db_password = os.getenv("DB_PASSWORD", "tool_pass").strip()
+        self._db_connect_timeout = int(os.getenv("DB_CONNECT_TIMEOUT", "3").strip() or "3")
+        self._db_schema = os.getenv("DB_SCHEMA", "intern_task").strip()
 
     def run(self, params: Dict[str, Any]) -> Dict[str, Any]:
         query = self._normalize_query(params)
+        conn = self._connect_live_db()
+        if conn is None:
+            return {
+                "status": "error",
+                "message": "Live database unavailable. Check DB config and postgres container.",
+                "data": {},
+            }
 
-        if "sla" in query:
-            return self._lookup_sla(query)
-        if "policy" in query:
-            return self._lookup_policy(query)
-        if "account status" in query or "account" in query:
-            return self._lookup_account(query)
+        try:
+            if "sla" in query:
+                return self._lookup_sla_db(conn, query)
+            if "policy" in query:
+                return self._lookup_policy_db(conn, query)
+            if "account status" in query or "account" in query:
+                return self._lookup_account_db(conn, query)
+
+            return {
+                "status": "error",
+                "message": "Unsupported structured query. Use SLA, policy, or account status.",
+                "data": {},
+            }
+        finally:
+            conn.close()
+
+    def search_relevant(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Find relevant structured data even when keyword routing does not match."""
+        query = self._normalize_query(params)
+        conn = self._connect_live_db()
+        if conn is None:
+            return {
+                "status": "error",
+                "message": "Live database unavailable. Check DB config and postgres container.",
+                "data": {},
+            }
+
+        try:
+            candidates: List[Dict[str, Any]] = []
+            candidates.extend(self._collect_sla_candidates(conn))
+            candidates.extend(self._collect_policy_candidates(conn))
+            candidates.extend(self._collect_account_candidates(conn))
+            candidates.extend(self._collect_system_status_candidates(conn))
+        finally:
+            conn.close()
+
+        query_tokens = self._tokenize(query)
+        best_candidate: Dict[str, Any] | None = None
+        best_score = 0
+
+        for candidate in candidates:
+            score = self._score_candidate(query, query_tokens, candidate["match_text"])
+            if score > best_score:
+                best_score = score
+                best_candidate = candidate
+
+        if best_candidate is None or best_score < 2:
+            return {
+                "status": "error",
+                "message": "No relevant structured data found for fallback lookup.",
+                "data": {},
+            }
 
         return {
-            "status": "error",
-            "message": "Unsupported structured query. Use SLA, policy, or account status.",
-            "data": {},
+            "status": "ok",
+            "message": f"Found fallback structured data from {best_candidate['source']}.",
+            "data": {
+                "source": best_candidate["source"],
+                "record": best_candidate["record"],
+                "score": best_score,
+            },
         }
 
     @staticmethod
@@ -117,9 +100,55 @@ class StructuredDataTool:
             raise ValueError("structured_data_tool requires non-empty string 'query'.")
         return " ".join(query.lower().split())
 
-    def _lookup_sla(self, query: str) -> Dict[str, Any]:
-        for service_name, record in self._sla.items():
-            if service_name in query:
+    def _connect_live_db(self) -> Any | None:
+        try:
+            import psycopg  # type: ignore
+        except Exception:
+            return None
+
+        try:
+            if self._db_dsn:
+                return psycopg.connect(self._db_dsn, connect_timeout=self._db_connect_timeout)
+            return psycopg.connect(
+                host=self._db_host,
+                port=self._db_port,
+                dbname=self._db_name,
+                user=self._db_user,
+                password=self._db_password,
+                connect_timeout=self._db_connect_timeout,
+            )
+        except Exception:
+            return None
+
+    def _lookup_sla_db(self, conn: Any, query: str) -> Dict[str, Any]:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    service_name,
+                    tier,
+                    response_time,
+                    resolution_time,
+                    availability,
+                    support_channels,
+                    escalation_available
+                FROM {self._db_schema}.sla_lookup
+                """
+            )
+            rows = cur.fetchall()
+
+        for row in rows:
+            service_name = str(row[0])
+            if service_name.lower() in query:
+                record = {
+                    "service_name": service_name,
+                    "tier": str(row[1]),
+                    "response_time": str(row[2]),
+                    "resolution_time": str(row[3]),
+                    "availability": str(row[4]),
+                    "support_channels": list(row[5]),
+                    "escalation_available": bool(row[6]),
+                }
                 return {
                     "status": "ok",
                     "message": (
@@ -128,29 +157,52 @@ class StructuredDataTool:
                     ),
                     "data": record,
                 }
+
         return {
             "status": "error",
             "message": "SLA service name not found in query.",
             "data": {},
         }
 
-    def _lookup_policy(self, query: str) -> Dict[str, Any]:
+    def _lookup_policy_db(self, conn: Any, query: str) -> Dict[str, Any]:
         for role in ("employee", "manager", "admin", "support"):
             if role in query:
                 role_title = role.capitalize()
-                matches = [p for p in self._policies if role_title in p["role_scope"]]
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT policy_id, title, category, description, role_scope
+                        FROM {self._db_schema}.policies
+                        WHERE %s = ANY(role_scope)
+                        ORDER BY policy_id
+                        """,
+                        (role_title,),
+                    )
+                    rows = cur.fetchall()
+
+                matches = [
+                    {
+                        "policy_id": str(row[0]),
+                        "title": str(row[1]),
+                        "category": str(row[2]),
+                        "description": str(row[3]),
+                        "role_scope": list(row[4]),
+                    }
+                    for row in rows
+                ]
                 return {
                     "status": "ok",
                     "message": f"Found {len(matches)} policies for role {role_title}.",
                     "data": {"role": role_title, "policies": matches},
                 }
+
         return {
             "status": "error",
             "message": "Policy role not found. Include employee/manager/admin/support.",
             "data": {},
         }
 
-    def _lookup_account(self, query: str) -> Dict[str, Any]:
+    def _lookup_account_db(self, conn: Any, query: str) -> Dict[str, Any]:
         matched = re.search(r"\b\d{3,}\b", query)
         if not matched:
             return {
@@ -158,116 +210,244 @@ class StructuredDataTool:
                 "message": "Account query must include numeric user id.",
                 "data": {},
             }
+
         user_id = matched.group(0)
-        account = self._accounts.get(user_id)
-        if account is None:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT user_id, name, role, status, service_plan, last_login
+                FROM {self._db_schema}.accounts
+                WHERE user_id = %s
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
+
+        if row is None:
             return {
                 "status": "error",
                 "message": f"Account {user_id} not found.",
                 "data": {},
             }
+
+        account = {
+            "user_id": str(row[0]),
+            "name": str(row[1]),
+            "role": str(row[2]),
+            "status": str(row[3]),
+            "service_plan": str(row[4]),
+            "last_login": str(row[5]),
+        }
         return {
             "status": "ok",
             "message": f"Account {user_id} status is {account['status']}.",
             "data": account,
         }
 
-    def _load_from_seed_sql(self) -> None:
-        seed_path = Path(__file__).resolve().parents[2] / "data" / "internal_database_seed.sql"
-        if not seed_path.exists():
-            return
+    def _collect_sla_candidates(self, conn: Any) -> List[Dict[str, Any]]:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    service_name,
+                    tier,
+                    response_time,
+                    resolution_time,
+                    availability,
+                    support_channels,
+                    escalation_available
+                FROM {self._db_schema}.sla_lookup
+                """
+            )
+            rows = cur.fetchall()
 
-        sql_text = seed_path.read_text(encoding="utf-8")
-        parsed_sla = self._parse_sla(sql_text)
-        parsed_accounts = self._parse_accounts(sql_text)
-        parsed_policies = self._parse_policies(sql_text)
-
-        if parsed_sla:
-            self._sla = parsed_sla
-        if parsed_accounts:
-            self._accounts = parsed_accounts
-        if parsed_policies:
-            self._policies = parsed_policies
-
-    @staticmethod
-    def _extract_insert_values(sql_text: str, table_name: str) -> str:
-        pattern = re.compile(
-            rf"INSERT\s+INTO\s+{table_name}\b.*?VALUES\s*(.*?)\s*ON\s+CONFLICT",
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        matched = pattern.search(sql_text)
-        return matched.group(1) if matched else ""
-
-    @staticmethod
-    def _parse_array_values(array_sql: str) -> List[str]:
-        return re.findall(r"'([^']*)'", array_sql)
-
-    @classmethod
-    def _parse_policies(cls, sql_text: str) -> List[Dict[str, Any]]:
-        values_sql = cls._extract_insert_values(sql_text, "policies")
-        if not values_sql:
-            return []
-
-        pattern = re.compile(
-            r"\(\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*ARRAY\[(.*?)\]::text\[\]\s*\)",
-            flags=re.DOTALL,
-        )
-        policies: List[Dict[str, Any]] = []
-        for match in pattern.finditer(values_sql):
-            policies.append(
+        candidates = []
+        for row in rows:
+            record = {
+                "service_name": str(row[0]),
+                "tier": str(row[1]),
+                "response_time": str(row[2]),
+                "resolution_time": str(row[3]),
+                "availability": str(row[4]),
+                "support_channels": list(row[5]),
+                "escalation_available": bool(row[6]),
+            }
+            candidates.append(
                 {
-                    "policy_id": match.group(1),
-                    "title": match.group(2),
-                    "category": match.group(3),
-                    "description": match.group(4),
-                    "role_scope": cls._parse_array_values(match.group(5)),
+                    "source": "sla_lookup",
+                    "match_text": " ".join(
+                        [
+                            record["service_name"],
+                            record["tier"],
+                            record["response_time"],
+                            record["resolution_time"],
+                            record["availability"],
+                            " ".join(record["support_channels"]),
+                            "service support plan",
+                        ]
+                    ),
+                    "record": record,
                 }
             )
-        return policies
+        return candidates
 
-    @classmethod
-    def _parse_sla(cls, sql_text: str) -> Dict[str, Dict[str, Any]]:
-        values_sql = cls._extract_insert_values(sql_text, "sla_lookup")
-        if not values_sql:
-            return {}
+    def _collect_policy_candidates(self, conn: Any) -> List[Dict[str, Any]]:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT p.policy_id, p.title, p.category, p.description, p.role_scope, pr.rule_text
+                FROM {self._db_schema}.policies p
+                LEFT JOIN {self._db_schema}.policy_rules pr
+                    ON p.policy_id = pr.policy_id
+                ORDER BY p.policy_id, pr.rule_order
+                """
+            )
+            rows = cur.fetchall()
 
-        pattern = re.compile(
-            r"\(\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*ARRAY\[(.*?)\]::text\[\]\s*,\s*(true|false)\s*\)",
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        sla_records: Dict[str, Dict[str, Any]] = {}
-        for match in pattern.finditer(values_sql):
-            service_name = match.group(1)
-            sla_records[service_name.lower()] = {
-                "service_name": service_name,
-                "tier": match.group(2),
-                "response_time": match.group(3),
-                "resolution_time": match.group(4),
-                "availability": match.group(5),
-                "support_channels": cls._parse_array_values(match.group(6)),
-                "escalation_available": match.group(7).lower() == "true",
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            policy_id = str(row[0])
+            if policy_id not in grouped:
+                grouped[policy_id] = {
+                    "policy_id": policy_id,
+                    "title": str(row[1]),
+                    "category": str(row[2]),
+                    "description": str(row[3]),
+                    "role_scope": list(row[4]),
+                    "rules": [],
+                }
+            if len(row) > 5 and row[5] is not None:
+                grouped[policy_id]["rules"].append(str(row[5]))
+
+        candidates = []
+        for record in grouped.values():
+            candidates.append(
+                {
+                    "source": "policies",
+                    "match_text": " ".join(
+                        [
+                            record["policy_id"],
+                            record["title"],
+                            record["category"],
+                            record["description"],
+                            " ".join(record["role_scope"]),
+                            " ".join(record["rules"]),
+                        ]
+                    ),
+                    "record": record,
+                }
+            )
+        return candidates
+
+    def _collect_account_candidates(self, conn: Any) -> List[Dict[str, Any]]:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT user_id, name, role, status, service_plan, last_login
+                FROM {self._db_schema}.accounts
+                """
+            )
+            rows = cur.fetchall()
+
+        candidates = []
+        for row in rows:
+            record = {
+                "user_id": str(row[0]),
+                "name": str(row[1]),
+                "role": str(row[2]),
+                "status": str(row[3]),
+                "service_plan": str(row[4]),
+                "last_login": str(row[5]),
             }
-        return sla_records
+            candidates.append(
+                {
+                    "source": "accounts",
+                    "match_text": " ".join(record.values()),
+                    "record": record,
+                }
+            )
+        return candidates
 
-    @classmethod
-    def _parse_accounts(cls, sql_text: str) -> Dict[str, Dict[str, Any]]:
-        values_sql = cls._extract_insert_values(sql_text, "accounts")
-        if not values_sql:
-            return {}
+    def _collect_system_status_candidates(self, conn: Any) -> List[Dict[str, Any]]:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT current_load_percentage, active_incidents, system_health, maintenance_mode, last_updated
+                FROM {self._db_schema}.system_status
+                WHERE id = 1
+                """
+            )
+            row = cur.fetchone()
 
-        pattern = re.compile(
-            r"\(\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*'([^']+)'\s*::timestamptz\s*\)",
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        accounts: Dict[str, Dict[str, Any]] = {}
-        for match in pattern.finditer(values_sql):
-            user_id = match.group(1)
-            accounts[user_id] = {
-                "user_id": user_id,
-                "name": match.group(2),
-                "role": match.group(3),
-                "status": match.group(4),
-                "service_plan": match.group(5),
-                "last_login": match.group(6),
+        if row is None:
+            return []
+
+        record = {
+            "current_load_percentage": int(row[0]),
+            "active_incidents": int(row[1]),
+            "system_health": str(row[2]),
+            "maintenance_mode": bool(row[3]),
+            "last_updated": str(row[4]),
+        }
+        return [
+            {
+                "source": "system_status",
+                "match_text": (
+                    f"system status health load incidents maintenance operational "
+                    f"{record['system_health']} {record['current_load_percentage']}"
+                ),
+                "record": record,
             }
-        return accounts
+        ]
+
+    @staticmethod
+    def _tokenize(text: str) -> List[str]:
+        stopwords = {
+            "a",
+            "an",
+            "and",
+            "are",
+            "can",
+            "for",
+            "how",
+            "i",
+            "is",
+            "me",
+            "of",
+            "on",
+            "our",
+            "please",
+            "tell",
+            "the",
+            "this",
+            "to",
+            "what",
+            "when",
+            "who",
+            "why",
+        }
+        tokens = re.findall(r"[a-z0-9]+", text.lower())
+        return [token for token in tokens if len(token) > 1 and token not in stopwords]
+
+    def _score_candidate(self, query: str, query_tokens: List[str], match_text: str) -> int:
+        candidate_tokens = set(self._tokenize(match_text))
+        overlap = sum(1 for token in query_tokens if token in candidate_tokens)
+
+        bonus = 0
+        lowered_match = match_text.lower()
+        for phrase in self._phrase_windows(query_tokens):
+            if phrase in lowered_match:
+                bonus = max(bonus, len(phrase.split()))
+
+        if query in lowered_match:
+            bonus += 2
+
+        return overlap + bonus
+
+    @staticmethod
+    def _phrase_windows(tokens: List[str]) -> List[str]:
+        phrases: List[str] = []
+        for size in (3, 2):
+            for index in range(0, max(len(tokens) - size + 1, 0)):
+                phrases.append(" ".join(tokens[index : index + size]))
+        return phrases

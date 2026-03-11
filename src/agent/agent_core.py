@@ -9,6 +9,8 @@ from .decision_engine import DecisionEngine
 
 
 LoggerFn = Callable[[str, Dict[str, Any]], None]
+ToolFn = Callable[[Dict[str, Any]], Dict[str, Any]]
+ContextualAnswerFn = Callable[[str, Dict[str, Any]], str]
 
 
 @dataclass
@@ -18,6 +20,8 @@ class AgentDependencies:
     structured_data_tool: Callable[[Dict[str, Any]], Dict[str, Any]]
     external_api_tool: Callable[[Dict[str, Any]], Dict[str, Any]]
     guardrail_tool: Callable[[Dict[str, Any]], Dict[str, Any]]
+    fallback_lookup_tool: Optional[ToolFn] = None
+    contextual_answer: Optional[ContextualAnswerFn] = None
     logger: Optional[LoggerFn] = None
 
 
@@ -68,7 +72,7 @@ class ToolEnabledAgent:
             self._log("tool_output", {"tool": "external_api_tool", "output": tool_output})
             answer = self._build_answer(tool_output)
         else:
-            answer = "I can help with SLA, policy, account status, and system load checks."
+            answer = self._handle_direct_answer(query)
 
         risk_input = {
             "query": query,
@@ -132,3 +136,67 @@ class ToolEnabledAgent:
     def _log(self, event: str, payload: Dict[str, Any]) -> None:
         if self._deps.logger is not None:
             self._deps.logger(event, payload)
+
+    def _handle_direct_answer(self, query: str) -> str:
+        default_answer = "I can help with SLA, policy, account status, and system load checks."
+        if self._deps.fallback_lookup_tool is None:
+            return default_answer
+
+        lookup_input = {"query": query}
+        self._log("tool_input", {"tool": "fallback_lookup_tool", "input": lookup_input})
+        lookup_output = self._deps.fallback_lookup_tool(lookup_input)
+        self._log("tool_output", {"tool": "fallback_lookup_tool", "output": lookup_output})
+
+        if lookup_output.get("status") != "ok":
+            return default_answer
+
+        if self._deps.contextual_answer is None:
+            return self._build_contextual_fallback(lookup_output)
+
+        try:
+            answer = self._deps.contextual_answer(query, lookup_output.get("data", {}))
+            self._log(
+                "contextual_answer_generated",
+                {"query": query, "source": lookup_output.get("data", {}).get("source")},
+            )
+            return answer
+        except Exception as exc:
+            self._log(
+                "contextual_answer_failed",
+                {"query": query, "error": str(exc)},
+            )
+            return self._build_contextual_fallback(lookup_output)
+
+    @staticmethod
+    def _build_contextual_fallback(lookup_output: Dict[str, Any]) -> str:
+        data = lookup_output.get("data", {})
+        source = data.get("source")
+        record = data.get("record", {})
+
+        if source == "sla_lookup":
+            return (
+                f"{record.get('service_name', 'This service')} has response time "
+                f"{record.get('response_time', 'unknown')} and resolution time "
+                f"{record.get('resolution_time', 'unknown')}."
+            )
+
+        if source == "accounts":
+            return (
+                f"Account {record.get('user_id', 'unknown')} for {record.get('name', 'unknown user')} "
+                f"is {record.get('status', 'unknown')} on plan {record.get('service_plan', 'unknown')}."
+            )
+
+        if source == "policies":
+            return (
+                f"{record.get('title', 'Policy')} is in category {record.get('category', 'unknown')} "
+                f"and applies to {', '.join(record.get('role_scope', [])) or 'unknown roles'}."
+            )
+
+        if source == "system_status":
+            return (
+                f"System health is {record.get('system_health', 'unknown')} with "
+                f"{record.get('current_load_percentage', 'unknown')}% load and "
+                f"{record.get('active_incidents', 'unknown')} active incidents."
+            )
+
+        return self._build_answer(lookup_output)
