@@ -1,6 +1,5 @@
 """Unit tests for tool behavior."""
 
-import time
 import unittest
 
 from src.tools.external_api_tool import ExternalAPITool
@@ -104,19 +103,71 @@ class StructuredDataToolTests(unittest.TestCase):
 
 
 class ExternalAPIToolTests(unittest.TestCase):
+    class _FakeResponse:
+        def __init__(self, payload, status_code=200):
+            self._payload = payload
+            self.status_code = status_code
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+
+        def json(self):
+            return self._payload
+
+    class _FakeRequester:
+        def __init__(self, responses):
+            self._responses = responses
+
+        def get(self, url, params=None, timeout=None):
+            if "geocoding-api" in url:
+                payload = self._responses["geocode"]
+            else:
+                payload = self._responses["forecast"]
+            if isinstance(payload, Exception):
+                raise payload
+            return ExternalAPIToolTests._FakeResponse(payload)
+
     def test_external_api_success(self) -> None:
-        tool = ExternalAPITool()
-        result = tool.run({"query": "system load"})
+        tool = ExternalAPITool(
+            requester=self._FakeRequester(
+                {
+                    "geocode": {
+                        "results": [
+                            {
+                                "name": "Jakarta",
+                                "country": "Indonesia",
+                                "latitude": -6.175,
+                                "longitude": 106.827,
+                            }
+                        ]
+                    },
+                    "forecast": {
+                        "current": {
+                            "temperature_2m": 31.2,
+                            "apparent_temperature": 35.0,
+                            "relative_humidity_2m": 74,
+                            "weather_code": 2,
+                            "wind_speed_10m": 12.4,
+                        }
+                    },
+                }
+            )
+        )
+        result = tool.run({"query": "cuaca hari ini di jakarta"})
         self.assertEqual(result["status"], "ok")
-        self.assertIn("System load", result["message"])
+        self.assertIn("Jakarta", result["message"])
+        self.assertEqual(result["data"]["condition"], "Partly cloudy")
 
     def test_external_api_failure_with_retry_fallback(self) -> None:
         events = []
-        tool = ExternalAPITool(logger=lambda e, p: events.append((e, p)))
+        tool = ExternalAPITool(
+            logger=lambda e, p: events.append((e, p)),
+            requester=self._FakeRequester({"geocode": ConnectionError("boom"), "forecast": {}}),
+        )
         result = tool.run(
             {
-                "query": "system load",
-                "simulate_failure": True,
+                "query": "cuaca di jakarta",
                 "max_retries": 2,
             }
         )
@@ -125,11 +176,41 @@ class ExternalAPIToolTests(unittest.TestCase):
         self.assertEqual(len(retry_events), 2)
 
     def test_external_api_timeout_fallback(self) -> None:
-        tool = ExternalAPITool(sleeper=time.sleep)
+        class SlowRequester:
+            def get(self, url, params=None, timeout=None):
+                import time
+
+                if "geocoding-api" in url:
+                    return ExternalAPIToolTests._FakeResponse(
+                        {
+                            "results": [
+                                {
+                                    "name": "Jakarta",
+                                    "country": "Indonesia",
+                                    "latitude": -6.175,
+                                    "longitude": 106.827,
+                                }
+                            ]
+                        }
+                    )
+
+                time.sleep(0.01)
+                return ExternalAPIToolTests._FakeResponse(
+                    {
+                        "current": {
+                            "temperature_2m": 30,
+                            "apparent_temperature": 33,
+                            "relative_humidity_2m": 70,
+                            "weather_code": 1,
+                            "wind_speed_10m": 10,
+                        }
+                    }
+                )
+
+        tool = ExternalAPITool(requester=SlowRequester())
         result = tool.run(
             {
-                "query": "system load",
-                "simulate_delay_seconds": 0.01,
+                "query": "cuaca di jakarta",
                 "timeout_seconds": 0.001,
                 "max_retries": 0,
             }

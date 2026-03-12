@@ -22,6 +22,10 @@ class DecisionEngineTests(unittest.TestCase):
         result = self.engine.decide("What is today's system load?")
         self.assertEqual(result.action, "external_api_tool")
 
+    def test_decide_external_api_tool_for_weather(self) -> None:
+        result = self.engine.decide("cuaca hari ini di jakarta")
+        self.assertEqual(result.action, "external_api_tool")
+
     def test_decide_direct_answer(self) -> None:
         result = self.engine.decide("Hello there")
         self.assertEqual(result.action, "direct_answer")
@@ -84,6 +88,33 @@ class AgentFlowTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["decision"], "direct_answer")
         self.assertIn("1 hour", result["message"])
+
+    def test_handle_query_external_tool_uses_contextual_answer_when_available(self) -> None:
+        agent = ToolEnabledAgent(
+            AgentDependencies(
+                structured_data_tool=lambda p: {"status": "ok", "message": "structured-ok"},
+                external_api_tool=lambda p: {
+                    "status": "ok",
+                    "message": "weather-ok",
+                    "data": {
+                        "city": "Jakarta",
+                        "temperature_c": 31,
+                        "condition": "Partly cloudy",
+                    },
+                },
+                guardrail_tool=self.guardrail.run,
+                fallback_lookup_tool=lambda p: {"status": "error", "message": "no-match", "data": {}},
+                contextual_answer=lambda query, data: (
+                    f"{data['record']['city']} sekarang {data['record']['temperature_c']}C dan "
+                    f"{data['record']['condition']}."
+                ),
+                logger=lambda e, p: self.logs.append((e, p)),
+            )
+        )
+        result = agent.handle_query("cuaca hari ini di jakarta")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["decision"], "external_api_tool")
+        self.assertIn("Jakarta", result["message"])
 
 
 if __name__ == "__main__":

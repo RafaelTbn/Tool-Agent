@@ -70,7 +70,7 @@ class ToolEnabledAgent:
             self._log("tool_input", {"tool": "external_api_tool", "input": tool_input})
             tool_output = self._deps.external_api_tool(tool_input)
             self._log("tool_output", {"tool": "external_api_tool", "output": tool_output})
-            answer = self._build_answer(tool_output)
+            answer = self._build_tool_answer(query, "external_api_tool", tool_output)
         else:
             answer = self._handle_direct_answer(query)
 
@@ -116,6 +116,32 @@ class ToolEnabledAgent:
         if "message" in tool_output:
             return str(tool_output["message"])
         return str(tool_output)
+
+    def _build_tool_answer(
+        self,
+        query: str,
+        source: str,
+        tool_output: Dict[str, Any],
+    ) -> str:
+        if tool_output.get("status") != "ok" or self._deps.contextual_answer is None:
+            return self._build_answer(tool_output)
+
+        try:
+            answer = self._deps.contextual_answer(
+                query,
+                {"source": source, "record": tool_output.get("data", {})},
+            )
+            self._log(
+                "contextual_answer_generated",
+                {"query": query, "source": source},
+            )
+            return answer
+        except Exception as exc:
+            self._log(
+                "contextual_answer_failed",
+                {"query": query, "source": source, "error": str(exc)},
+            )
+            return self._build_answer(tool_output)
 
     @staticmethod
     def _response(
