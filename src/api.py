@@ -13,6 +13,7 @@ agent = build_agent()
 
 class QueryRequest(BaseModel):
     query: str
+    include_debug: bool = False
 
 
 @app.get("/health")
@@ -22,4 +23,4 @@ def health() -> dict[str, str]:
 
 @app.post("/query")
 def query(request: QueryRequest) -> dict:
-    return agent.handle_query(query=request.query)
+    return agent.handle_query(query=request.query, include_debug=request.include_debug)

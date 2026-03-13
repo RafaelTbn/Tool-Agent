@@ -21,7 +21,7 @@ class DecisionEngine:
     """
 
     _RISK_KEYWORDS = ("delete", "bypass", "drop", "disable security", "wipe", "override", "admin access", "production access", "shutdown")
-    _STRUCTURED_KEYWORDS = ("sla","policy", "account status", "internal database", "service name", "role",)
+    _STRUCTURED_KEYWORDS = ("sla", "policy", "account status", "account", "internal database", "service name", "role",)
     _EXTERNAL_KEYWORDS = (
         "system load",
         "external",

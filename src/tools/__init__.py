@@ -2,7 +2,7 @@
 
 from .external_api_tool import ExternalAPITool
 from .guardrail_tool import GuardrailTool
-from .structured_data_tool import StructuredDataTool
+from .structured_data import StructuredDataTool
 from .tool_registry import ToolRegistry
 
 __all__ = [

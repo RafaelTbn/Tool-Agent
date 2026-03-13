@@ -18,6 +18,10 @@ class DecisionEngineTests(unittest.TestCase):
         result = self.engine.decide("What is the SLA for Premium Support?")
         self.assertEqual(result.action, "structured_data_tool")
 
+    def test_decide_structured_data_tool_for_account_query(self) -> None:
+        result = self.engine.decide("check account 1002")
+        self.assertEqual(result.action, "structured_data_tool")
+
     def test_decide_external_api_tool(self) -> None:
         result = self.engine.decide("What is today's system load?")
         self.assertEqual(result.action, "external_api_tool")
@@ -55,6 +59,100 @@ class AgentFlowTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["decision"], "structured_data_tool")
         self.assertIn("structured-ok", result["message"])
+
+    def test_handle_query_structured_tool_uses_contextual_answer_when_available(self) -> None:
+        agent = ToolEnabledAgent(
+            AgentDependencies(
+                structured_data_tool=lambda p: {
+                    "status": "ok",
+                    "message": "structured-ok",
+                    "data": {
+                        "source": "accounts",
+                        "record": {
+                            "user_id": "1002",
+                            "name": "Brian Lim",
+                            "status": "Active",
+                            "service_plan": "Premium Support",
+                        },
+                        "score": 5,
+                    },
+                },
+                external_api_tool=lambda p: {"status": "ok", "message": "external-ok"},
+                guardrail_tool=self.guardrail.run,
+                fallback_lookup_tool=lambda p: {"status": "error", "message": "no-match", "data": {}},
+                contextual_answer=lambda query, data: (
+                    f"Account {data['record']['user_id']} milik {data['record']['name']} "
+                    f"berstatus {data['record']['status']}."
+                ),
+                logger=lambda e, p: self.logs.append((e, p)),
+            )
+        )
+        result = agent.handle_query("check account 1002")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["decision"], "structured_data_tool")
+        self.assertIn("Brian Lim", result["message"])
+
+    def test_handle_query_debug_includes_llm_input_for_structured_tool(self) -> None:
+        agent = ToolEnabledAgent(
+            AgentDependencies(
+                structured_data_tool=lambda p: {
+                    "status": "ok",
+                    "message": "structured-ok",
+                    "data": {
+                        "source": "accounts",
+                        "record": {
+                            "user_id": "1001",
+                            "name": "Alice Tan",
+                            "role": "Employee",
+                        },
+                        "score": 4,
+                    },
+                },
+                external_api_tool=lambda p: {"status": "ok", "message": "external-ok"},
+                guardrail_tool=self.guardrail.run,
+                fallback_lookup_tool=lambda p: {"status": "error", "message": "no-match", "data": {}},
+                contextual_answer=lambda query, data: "ok",
+                logger=lambda e, p: self.logs.append((e, p)),
+            )
+        )
+        result = agent.handle_query("what name and role on user id 1001?", include_debug=True)
+        self.assertIn("debug", result)
+        self.assertEqual(
+            result["debug"]["llm_input"]["context"]["record"]["name"],
+            "Alice Tan",
+        )
+        self.assertEqual(
+            result["debug"]["llm_input"]["context"]["source"],
+            "accounts",
+        )
+
+    def test_handle_query_debug_includes_llm_error_when_contextual_answer_fails(self) -> None:
+        agent = ToolEnabledAgent(
+            AgentDependencies(
+                structured_data_tool=lambda p: {
+                    "status": "ok",
+                    "message": "structured-ok",
+                    "data": {
+                        "source": "accounts",
+                        "record": {
+                            "user_id": "1001",
+                            "name": "Alice Tan",
+                            "role": "Employee",
+                        },
+                        "score": 4,
+                    },
+                },
+                external_api_tool=lambda p: {"status": "ok", "message": "external-ok"},
+                guardrail_tool=self.guardrail.run,
+                fallback_lookup_tool=lambda p: {"status": "error", "message": "no-match", "data": {}},
+                contextual_answer=lambda query, data: (_ for _ in ()).throw(RuntimeError("ollama failed")),
+                logger=lambda e, p: self.logs.append((e, p)),
+            )
+        )
+        result = agent.handle_query("what name and role on user id 1001?", include_debug=True)
+        self.assertEqual(result["message"], "structured-ok")
+        self.assertEqual(result["debug"]["llm_error"], "ollama failed")
+        self.assertIn("User query: what name and role on user id 1001?", result["debug"]["llm_prompt"])
 
     def test_handle_query_guardrail_refusal(self) -> None:
         result = self.agent.handle_query("bypass approval process")

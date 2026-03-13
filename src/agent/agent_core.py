@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
 from .decision_engine import DecisionEngine
+from src.services.ollama_service import OllamaService
 
 
 LoggerFn = Callable[[str, Dict[str, Any]], None]
@@ -36,7 +37,7 @@ class ToolEnabledAgent:
         self._deps = dependencies
         self._engine = decision_engine or DecisionEngine()
 
-    def handle_query(self, query: str) -> Dict[str, Any]:
+    def handle_query(self, query: str, include_debug: bool = False) -> Dict[str, Any]:
         """Execute the full flow for a single user query."""
         if not query or not query.strip():
             return self._response(
@@ -46,6 +47,7 @@ class ToolEnabledAgent:
             )
 
         decision = self._engine.decide(query)
+        debug: Dict[str, Any] = {}
         self._log(
             "decision_made",
             {"query": query, "action": decision.action, "reason": decision.reason},
@@ -64,15 +66,25 @@ class ToolEnabledAgent:
             self._log(
                 "tool_output", {"tool": "structured_data_tool", "output": tool_output}
             )
-            answer = self._build_answer(tool_output)
+            answer = self._build_tool_answer(
+                query,
+                "structured_data_tool",
+                tool_output,
+                debug,
+            )
         elif decision.action == "external_api_tool":
             tool_input = {"query": query}
             self._log("tool_input", {"tool": "external_api_tool", "input": tool_input})
             tool_output = self._deps.external_api_tool(tool_input)
             self._log("tool_output", {"tool": "external_api_tool", "output": tool_output})
-            answer = self._build_tool_answer(query, "external_api_tool", tool_output)
+            answer = self._build_tool_answer(
+                query,
+                "external_api_tool",
+                tool_output,
+                debug,
+            )
         else:
-            answer = self._handle_direct_answer(query)
+            answer = self._handle_direct_answer(query, debug)
 
         risk_input = {
             "query": query,
@@ -88,6 +100,7 @@ class ToolEnabledAgent:
                 decision=decision.action,
                 message=forced_refusal,
                 risk=risk,
+                debug=debug if include_debug else None,
             )
             self._log("final_response", refusal)
             return refusal
@@ -98,6 +111,7 @@ class ToolEnabledAgent:
                 decision=decision.action,
                 message=risk.get("reason", "Guardrail refused this response."),
                 risk=risk,
+                debug=debug if include_debug else None,
             )
             self._log("final_response", refusal)
             return refusal
@@ -107,6 +121,7 @@ class ToolEnabledAgent:
             decision=decision.action,
             message=answer,
             risk=risk,
+            debug=debug if include_debug else None,
         )
         self._log("final_response", final)
         return final
@@ -122,21 +137,37 @@ class ToolEnabledAgent:
         query: str,
         source: str,
         tool_output: Dict[str, Any],
+        debug: Optional[Dict[str, Any]] = None,
     ) -> str:
         if tool_output.get("status") != "ok" or self._deps.contextual_answer is None:
             return self._build_answer(tool_output)
 
+        tool_data = tool_output.get("data", {})
+        if (
+            isinstance(tool_data, dict)
+            and any(key in tool_data for key in ("source", "sources", "record", "records"))
+        ):
+            context = tool_data
+        else:
+            context = {"source": source, "record": tool_data}
+
+        if debug is not None:
+            debug["llm_input"] = {
+                "query": query,
+                "context": context,
+            }
+            debug["llm_prompt"] = OllamaService.build_prompt(query, context)
+
         try:
-            answer = self._deps.contextual_answer(
-                query,
-                {"source": source, "record": tool_output.get("data", {})},
-            )
+            answer = self._deps.contextual_answer(query, context)
             self._log(
                 "contextual_answer_generated",
-                {"query": query, "source": source},
+                {"query": query, "source": context.get("source", source)},
             )
             return answer
         except Exception as exc:
+            if debug is not None:
+                debug["llm_error"] = str(exc)
             self._log(
                 "contextual_answer_failed",
                 {"query": query, "source": source, "error": str(exc)},
@@ -149,6 +180,7 @@ class ToolEnabledAgent:
         decision: str,
         message: str,
         risk: Optional[Dict[str, Any]] = None,
+        debug: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         response: Dict[str, Any] = {
             "status": status,
@@ -157,13 +189,15 @@ class ToolEnabledAgent:
         }
         if risk is not None:
             response["risk"] = risk
+        if debug:
+            response["debug"] = debug
         return response
 
     def _log(self, event: str, payload: Dict[str, Any]) -> None:
         if self._deps.logger is not None:
             self._deps.logger(event, payload)
 
-    def _handle_direct_answer(self, query: str) -> str:
+    def _handle_direct_answer(self, query: str, debug: Optional[Dict[str, Any]] = None) -> str:
         default_answer = "I can help with SLA, policy, account status, and system load checks."
         if self._deps.fallback_lookup_tool is None:
             return default_answer
@@ -179,6 +213,16 @@ class ToolEnabledAgent:
         if self._deps.contextual_answer is None:
             return self._build_contextual_fallback(lookup_output)
 
+        if debug is not None:
+            debug["llm_input"] = {
+                "query": query,
+                "context": lookup_output.get("data", {}),
+            }
+            debug["llm_prompt"] = OllamaService.build_prompt(
+                query,
+                lookup_output.get("data", {}),
+            )
+
         try:
             answer = self._deps.contextual_answer(query, lookup_output.get("data", {}))
             self._log(
@@ -187,6 +231,8 @@ class ToolEnabledAgent:
             )
             return answer
         except Exception as exc:
+            if debug is not None:
+                debug["llm_error"] = str(exc)
             self._log(
                 "contextual_answer_failed",
                 {"query": query, "error": str(exc)},
@@ -196,8 +242,32 @@ class ToolEnabledAgent:
     @staticmethod
     def _build_contextual_fallback(lookup_output: Dict[str, Any]) -> str:
         data = lookup_output.get("data", {})
+        if "sources" in data:
+            summaries = []
+            for source_entry in data.get("sources", []):
+                source_name = source_entry.get("source", "unknown")
+                count = source_entry.get("match_count", len(source_entry.get("records", [])))
+                summaries.append(f"{count} row(s) from {source_name}")
+            return "Found structured data: " + ", ".join(summaries) + "."
+
         source = data.get("source")
+        records = data.get("records", [])
         record = data.get("record", {})
+
+        if source == "accounts" and records:
+            users = ", ".join(
+                f"{item.get('user_id', 'unknown')} ({item.get('name', 'unknown user')})"
+                for item in records
+            )
+            return f"Found {len(records)} matching accounts: {users}."
+
+        if source == "sla_lookup" and records:
+            services = ", ".join(str(item.get("service_name", "unknown")) for item in records)
+            return f"Found {len(records)} matching service plans: {services}."
+
+        if source == "policies" and records:
+            policies = ", ".join(str(item.get("policy_id", "unknown")) for item in records)
+            return f"Found {len(records)} matching policies: {policies}."
 
         if source == "sla_lookup":
             return (
@@ -217,6 +287,9 @@ class ToolEnabledAgent:
                 f"{record.get('title', 'Policy')} is in category {record.get('category', 'unknown')} "
                 f"and applies to {', '.join(record.get('role_scope', [])) or 'unknown roles'}."
             )
+
+        if source == "structured_data_tool":
+            return f"Found relevant structured data with score {data.get('score', 'unknown')}."
 
         if source == "system_status":
             return (

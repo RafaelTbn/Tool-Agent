@@ -16,17 +16,22 @@ class OllamaService:
         model: str = "qwen2.5:3b",
         timeout_seconds: float = 30.0,
     ) -> None:
+        self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout_seconds = timeout_seconds
 
-    def answer_with_context(self, query: str, context: Dict[str, Any]) -> str:
-        prompt = (
+    @staticmethod
+    def build_prompt(query: str, context: Dict[str, Any]) -> str:
+        return (
             "You answer user questions using only the provided tool data.\n"
             "If the data is insufficient, say so briefly.\n"
             "Keep the answer concise and factual.\n\n"
             f"User query: {query.strip()}\n"
             f"Tool data: {json.dumps(context, ensure_ascii=True, sort_keys=True)}"
         )
+
+    def answer_with_context(self, query: str, context: Dict[str, Any]) -> str:
+        prompt = self.build_prompt(query, context)
 
         payload = json.dumps(
             {

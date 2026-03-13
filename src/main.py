@@ -21,7 +21,7 @@ def build_agent() -> ToolEnabledAgent:
     ollama_service = OllamaService(
         base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         model=os.getenv("OLLAMA_MODEL", "qwen2.5:3b"),
-        timeout_seconds=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "30")),
+        timeout_seconds=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "240")),
     )
 
     structured_tool = StructuredDataTool()
