@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from .dependencies import AgentDependencies, ToolFn
 from .decision_engine import DecisionEngine
