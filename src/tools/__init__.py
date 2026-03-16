@@ -1,6 +1,6 @@
 """Tool package exports."""
 
-from .external_api_tool import ExternalAPITool
+from .external_api import ExternalAPITool
 from .guardrail_tool import GuardrailTool
 from .structured_data import StructuredDataTool
 from .tool_registry import ToolRegistry
