@@ -1,6 +1,7 @@
 """Agent package exports."""
 
-from .agent_core import AgentDependencies, ToolEnabledAgent
+from .agent_core import ToolEnabledAgent
+from .dependencies import AgentDependencies
 from .decision_engine import Decision, DecisionEngine
 
 __all__ = [

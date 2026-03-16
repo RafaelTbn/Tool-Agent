@@ -2,28 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Dict, Optional
 
+from .dependencies import AgentDependencies, ToolFn
 from .decision_engine import DecisionEngine
-from src.services.ollama_service import OllamaService
-
-
-LoggerFn = Callable[[str, Dict[str, Any]], None]
-ToolFn = Callable[[Dict[str, Any]], Dict[str, Any]]
-ContextualAnswerFn = Callable[[str, Dict[str, Any]], str]
-
-
-@dataclass
-class AgentDependencies:
-    """Injected dependencies for execution and easier testing."""
-
-    structured_data_tool: Callable[[Dict[str, Any]], Dict[str, Any]]
-    external_api_tool: Callable[[Dict[str, Any]], Dict[str, Any]]
-    guardrail_tool: Callable[[Dict[str, Any]], Dict[str, Any]]
-    fallback_lookup_tool: Optional[ToolFn] = None
-    contextual_answer: Optional[ContextualAnswerFn] = None
-    logger: Optional[LoggerFn] = None
+from .response_utils import (
+    build_answer,
+    build_contextual_fallback,
+    build_response,
+    build_tool_context,
+    extract_context_source,
+    generate_contextual_answer,
+)
 
 
 class ToolEnabledAgent:
@@ -40,7 +30,7 @@ class ToolEnabledAgent:
     def handle_query(self, query: str, include_debug: bool = False) -> Dict[str, Any]:
         """Execute the full flow for a single user query."""
         if not query or not query.strip():
-            return self._response(
+            return build_response(
                 status="error",
                 decision="invalid_input",
                 message="Query must not be empty.",
@@ -58,30 +48,19 @@ class ToolEnabledAgent:
             forced_refusal = "Request refused due to unsafe intent."
             answer = forced_refusal
             self._log("refusal_decision", {"decision": decision.action, "message": answer})
-
         elif decision.action == "structured_data_tool":
-            tool_input = {"query": query}
-            self._log("tool_input", {"tool": "structured_data_tool", "input": tool_input})
-            tool_output = self._deps.structured_data_tool(tool_input)
-            self._log(
-                "tool_output", {"tool": "structured_data_tool", "output": tool_output}
-            )
-            answer = self._build_tool_answer(
-                query,
-                "structured_data_tool",
-                tool_output,
-                debug,
+            answer = self._execute_tool(
+                query=query,
+                tool_name="structured_data_tool",
+                tool_fn=self._deps.structured_data_tool,
+                debug=debug,
             )
         elif decision.action == "external_api_tool":
-            tool_input = {"query": query}
-            self._log("tool_input", {"tool": "external_api_tool", "input": tool_input})
-            tool_output = self._deps.external_api_tool(tool_input)
-            self._log("tool_output", {"tool": "external_api_tool", "output": tool_output})
-            answer = self._build_tool_answer(
-                query,
-                "external_api_tool",
-                tool_output,
-                debug,
+            answer = self._execute_tool(
+                query=query,
+                tool_name="external_api_tool",
+                tool_fn=self._deps.external_api_tool,
+                debug=debug,
             )
         else:
             answer = self._handle_direct_answer(query, debug)
@@ -95,7 +74,7 @@ class ToolEnabledAgent:
         self._log("risk_evaluated", {"input": risk_input, "result": risk})
 
         if forced_refusal is not None:
-            refusal = self._response(
+            refusal = build_response(
                 status="refused",
                 decision=decision.action,
                 message=forced_refusal,
@@ -106,7 +85,7 @@ class ToolEnabledAgent:
             return refusal
 
         if risk.get("status") == "refused":
-            refusal = self._response(
+            refusal = build_response(
                 status="refused",
                 decision=decision.action,
                 message=risk.get("reason", "Guardrail refused this response."),
@@ -116,7 +95,7 @@ class ToolEnabledAgent:
             self._log("final_response", refusal)
             return refusal
 
-        final = self._response(
+        final = build_response(
             status="ok",
             decision=decision.action,
             message=answer,
@@ -126,12 +105,6 @@ class ToolEnabledAgent:
         self._log("final_response", final)
         return final
 
-    @staticmethod
-    def _build_answer(tool_output: Dict[str, Any]) -> str:
-        if "message" in tool_output:
-            return str(tool_output["message"])
-        return str(tool_output)
-
     def _build_tool_answer(
         self,
         query: str,
@@ -139,59 +112,17 @@ class ToolEnabledAgent:
         tool_output: Dict[str, Any],
         debug: Optional[Dict[str, Any]] = None,
     ) -> str:
-        if tool_output.get("status") != "ok" or self._deps.contextual_answer is None:
-            return self._build_answer(tool_output)
-
-        tool_data = tool_output.get("data", {})
-        if (
-            isinstance(tool_data, dict)
-            and any(key in tool_data for key in ("source", "sources", "record", "records"))
-        ):
-            context = tool_data
-        else:
-            context = {"source": source, "record": tool_data}
-
-        if debug is not None:
-            debug["llm_input"] = {
-                "query": query,
-                "context": context,
-            }
-            debug["llm_prompt"] = OllamaService.build_prompt(query, context)
-
-        try:
-            answer = self._deps.contextual_answer(query, context)
-            self._log(
-                "contextual_answer_generated",
-                {"query": query, "source": context.get("source", source)},
-            )
-            return answer
-        except Exception as exc:
-            if debug is not None:
-                debug["llm_error"] = str(exc)
-            self._log(
-                "contextual_answer_failed",
-                {"query": query, "source": source, "error": str(exc)},
-            )
-            return self._build_answer(tool_output)
-
-    @staticmethod
-    def _response(
-        status: str,
-        decision: str,
-        message: str,
-        risk: Optional[Dict[str, Any]] = None,
-        debug: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        response: Dict[str, Any] = {
-            "status": status,
-            "decision": decision,
-            "message": message,
-        }
-        if risk is not None:
-            response["risk"] = risk
-        if debug:
-            response["debug"] = debug
-        return response
+        context = build_tool_context(source, tool_output.get("data", {}))
+        return generate_contextual_answer(
+            query=query,
+            context=context,
+            debug=debug,
+            source=source,
+            fallback_message=build_answer(tool_output),
+            tool_output=tool_output,
+            contextual_answer=self._deps.contextual_answer,
+            logger=self._deps.logger,
+        )
 
     def _log(self, event: str, payload: Dict[str, Any]) -> None:
         if self._deps.logger is not None:
@@ -202,100 +133,35 @@ class ToolEnabledAgent:
         if self._deps.fallback_lookup_tool is None:
             return default_answer
 
-        lookup_input = {"query": query}
-        self._log("tool_input", {"tool": "fallback_lookup_tool", "input": lookup_input})
-        lookup_output = self._deps.fallback_lookup_tool(lookup_input)
-        self._log("tool_output", {"tool": "fallback_lookup_tool", "output": lookup_output})
+        lookup_output = self._run_tool("fallback_lookup_tool", self._deps.fallback_lookup_tool, query)
 
         if lookup_output.get("status") != "ok":
             return default_answer
 
-        if self._deps.contextual_answer is None:
-            return self._build_contextual_fallback(lookup_output)
+        return generate_contextual_answer(
+            query=query,
+            context=lookup_output.get("data", {}),
+            debug=debug,
+            source=extract_context_source(lookup_output.get("data", {}), "fallback_lookup_tool"),
+            fallback_message=build_contextual_fallback(lookup_output),
+            tool_output=lookup_output,
+            contextual_answer=self._deps.contextual_answer,
+            logger=self._deps.logger,
+        )
 
-        if debug is not None:
-            debug["llm_input"] = {
-                "query": query,
-                "context": lookup_output.get("data", {}),
-            }
-            debug["llm_prompt"] = OllamaService.build_prompt(
-                query,
-                lookup_output.get("data", {}),
-            )
+    def _execute_tool(
+        self,
+        query: str,
+        tool_name: str,
+        tool_fn: ToolFn,
+        debug: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        tool_output = self._run_tool(tool_name, tool_fn, query)
+        return self._build_tool_answer(query, tool_name, tool_output, debug)
 
-        try:
-            answer = self._deps.contextual_answer(query, lookup_output.get("data", {}))
-            self._log(
-                "contextual_answer_generated",
-                {"query": query, "source": lookup_output.get("data", {}).get("source")},
-            )
-            return answer
-        except Exception as exc:
-            if debug is not None:
-                debug["llm_error"] = str(exc)
-            self._log(
-                "contextual_answer_failed",
-                {"query": query, "error": str(exc)},
-            )
-            return self._build_contextual_fallback(lookup_output)
-
-    @staticmethod
-    def _build_contextual_fallback(lookup_output: Dict[str, Any]) -> str:
-        data = lookup_output.get("data", {})
-        if "sources" in data:
-            summaries = []
-            for source_entry in data.get("sources", []):
-                source_name = source_entry.get("source", "unknown")
-                count = source_entry.get("match_count", len(source_entry.get("records", [])))
-                summaries.append(f"{count} row(s) from {source_name}")
-            return "Found structured data: " + ", ".join(summaries) + "."
-
-        source = data.get("source")
-        records = data.get("records", [])
-        record = data.get("record", {})
-
-        if source == "accounts" and records:
-            users = ", ".join(
-                f"{item.get('user_id', 'unknown')} ({item.get('name', 'unknown user')})"
-                for item in records
-            )
-            return f"Found {len(records)} matching accounts: {users}."
-
-        if source == "sla_lookup" and records:
-            services = ", ".join(str(item.get("service_name", "unknown")) for item in records)
-            return f"Found {len(records)} matching service plans: {services}."
-
-        if source == "policies" and records:
-            policies = ", ".join(str(item.get("policy_id", "unknown")) for item in records)
-            return f"Found {len(records)} matching policies: {policies}."
-
-        if source == "sla_lookup":
-            return (
-                f"{record.get('service_name', 'This service')} has response time "
-                f"{record.get('response_time', 'unknown')} and resolution time "
-                f"{record.get('resolution_time', 'unknown')}."
-            )
-
-        if source == "accounts":
-            return (
-                f"Account {record.get('user_id', 'unknown')} for {record.get('name', 'unknown user')} "
-                f"is {record.get('status', 'unknown')} on plan {record.get('service_plan', 'unknown')}."
-            )
-
-        if source == "policies":
-            return (
-                f"{record.get('title', 'Policy')} is in category {record.get('category', 'unknown')} "
-                f"and applies to {', '.join(record.get('role_scope', [])) or 'unknown roles'}."
-            )
-
-        if source == "structured_data_tool":
-            return f"Found relevant structured data with score {data.get('score', 'unknown')}."
-
-        if source == "system_status":
-            return (
-                f"System health is {record.get('system_health', 'unknown')} with "
-                f"{record.get('current_load_percentage', 'unknown')}% load and "
-                f"{record.get('active_incidents', 'unknown')} active incidents."
-            )
-
-        return self._build_answer(lookup_output)
+    def _run_tool(self, tool_name: str, tool_fn: ToolFn, query: str) -> Dict[str, Any]:
+        tool_input = {"query": query}
+        self._log("tool_input", {"tool": tool_name, "input": tool_input})
+        tool_output = tool_fn(tool_input)
+        self._log("tool_output", {"tool": tool_name, "output": tool_output})
+        return tool_output
