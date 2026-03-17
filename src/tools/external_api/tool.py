@@ -23,6 +23,18 @@ LoggerFn = Callable[[str, Dict[str, Any]], None]
 class ExternalAPITool:
     """Fetch current weather data from an external API."""
 
+    _WEATHER_KEYWORDS = (
+        "weather",
+        "cuaca",
+        "suhu",
+        "temperature",
+        "forecast",
+        "rain",
+        "hujan",
+        "wind",
+        "humidity",
+    )
+
     def __init__(
         self,
         retry_service: Optional[RetryService] = None,
@@ -39,6 +51,15 @@ class ExternalAPITool:
 
     def run(self, params: Dict[str, Any]) -> Dict[str, Any]:
         query = normalize_query(params)
+        if not self._is_weather_query(query):
+            return {
+                "status": "fallback",
+                "message": "External API tool currently supports weather queries only.",
+                "error": "unsupported_external_query",
+                "data": {},
+                "query": query,
+            }
+
         city = extract_city(query)
         timeout_seconds = float(params.get("timeout_seconds", 5.0))
         max_retries = int(params.get("max_retries", 2))
@@ -70,7 +91,12 @@ class ExternalAPITool:
     def _lookup_location(self, city: str, timeout_seconds: float) -> Dict[str, Any]:
         response = self._requester.get(
             self._geocode_url,
-            params={"name": city, "count": 1, "language": "en", "format": "json"},
+            params={
+                "name": city,
+                "count": 5,
+                "language": "en",
+                "format": "json",
+            },
             timeout=timeout_seconds,
         )
         response.raise_for_status()
@@ -99,3 +125,7 @@ class ExternalAPITool:
                 "retry_attempt",
                 {"attempt": attempt, "error": str(error), "tool": "external_api_tool"},
             )
+
+    @classmethod
+    def _is_weather_query(cls, query: str) -> bool:
+        return any(keyword in query for keyword in cls._WEATHER_KEYWORDS)

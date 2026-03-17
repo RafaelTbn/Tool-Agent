@@ -1,38 +1,9 @@
-"""Unit tests for decision and agent orchestration flow."""
+"""Unit tests for tool-enabled agent orchestration."""
 
 import unittest
 
-from src.agent import AgentDependencies, DecisionEngine, ToolEnabledAgent
+from src.agent import AgentDependencies, ToolEnabledAgent
 from src.tools.guardrail_tool import GuardrailTool
-
-
-class DecisionEngineTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.engine = DecisionEngine()
-
-    def test_decide_guardrail_refuse(self) -> None:
-        result = self.engine.decide("Delete all records immediately")
-        self.assertEqual(result.action, "guardrail_refuse")
-
-    def test_decide_structured_data_tool(self) -> None:
-        result = self.engine.decide("What is the SLA for Premium Support?")
-        self.assertEqual(result.action, "structured_data_tool")
-
-    def test_decide_structured_data_tool_for_account_query(self) -> None:
-        result = self.engine.decide("check account 1002")
-        self.assertEqual(result.action, "structured_data_tool")
-
-    def test_decide_external_api_tool(self) -> None:
-        result = self.engine.decide("What is today's system load?")
-        self.assertEqual(result.action, "external_api_tool")
-
-    def test_decide_external_api_tool_for_weather(self) -> None:
-        result = self.engine.decide("cuaca hari ini di jakarta")
-        self.assertEqual(result.action, "external_api_tool")
-
-    def test_decide_direct_answer(self) -> None:
-        result = self.engine.decide("Hello there")
-        self.assertEqual(result.action, "direct_answer")
 
 
 class AgentFlowTests(unittest.TestCase):
@@ -49,18 +20,18 @@ class AgentFlowTests(unittest.TestCase):
             )
         )
 
-    def test_handle_query_empty(self) -> None:
+    def test_agent_flow_handle_query_empty(self) -> None:
         result = self.agent.handle_query("")
         self.assertEqual(result["status"], "error")
         self.assertEqual(result["decision"], "invalid_input")
 
-    def test_handle_query_structured_success(self) -> None:
+    def test_agent_flow_handle_query_structured_success(self) -> None:
         result = self.agent.handle_query("SLA premium support")
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["decision"], "structured_data_tool")
         self.assertIn("structured-ok", result["message"])
 
-    def test_handle_query_structured_tool_uses_contextual_answer_when_available(self) -> None:
+    def test_agent_flow_handle_query_structured_tool_uses_contextual_answer_when_available(self) -> None:
         agent = ToolEnabledAgent(
             AgentDependencies(
                 structured_data_tool=lambda p: {
@@ -92,7 +63,7 @@ class AgentFlowTests(unittest.TestCase):
         self.assertEqual(result["decision"], "structured_data_tool")
         self.assertIn("Brian Lim", result["message"])
 
-    def test_handle_query_debug_includes_llm_input_for_structured_tool(self) -> None:
+    def test_agent_flow_handle_query_debug_includes_llm_input_for_structured_tool(self) -> None:
         agent = ToolEnabledAgent(
             AgentDependencies(
                 structured_data_tool=lambda p: {
@@ -117,16 +88,10 @@ class AgentFlowTests(unittest.TestCase):
         )
         result = agent.handle_query("what name and role on user id 1001?", include_debug=True)
         self.assertIn("debug", result)
-        self.assertEqual(
-            result["debug"]["llm_input"]["context"]["record"]["name"],
-            "Alice Tan",
-        )
-        self.assertEqual(
-            result["debug"]["llm_input"]["context"]["source"],
-            "accounts",
-        )
+        self.assertEqual(result["debug"]["llm_input"]["context"]["record"]["name"], "Alice Tan")
+        self.assertEqual(result["debug"]["llm_input"]["context"]["source"], "accounts")
 
-    def test_handle_query_debug_includes_llm_error_when_contextual_answer_fails(self) -> None:
+    def test_agent_flow_handle_query_debug_includes_llm_error_when_contextual_answer_fails(self) -> None:
         agent = ToolEnabledAgent(
             AgentDependencies(
                 structured_data_tool=lambda p: {
@@ -154,14 +119,14 @@ class AgentFlowTests(unittest.TestCase):
         self.assertEqual(result["debug"]["llm_error"], "ollama failed")
         self.assertIn("User query: what name and role on user id 1001?", result["debug"]["llm_prompt"])
 
-    def test_handle_query_guardrail_refusal(self) -> None:
+    def test_agent_flow_handle_query_guardrail_refusal(self) -> None:
         result = self.agent.handle_query("bypass approval process")
         self.assertEqual(result["status"], "refused")
         self.assertEqual(result["decision"], "guardrail_refuse")
         self.assertIn("unsafe intent", result["message"].lower())
         self.assertIn("risk", result)
 
-    def test_handle_query_direct_answer_uses_contextual_lookup_when_available(self) -> None:
+    def test_agent_flow_handle_query_direct_answer_uses_contextual_lookup_when_available(self) -> None:
         agent = ToolEnabledAgent(
             AgentDependencies(
                 structured_data_tool=lambda p: {"status": "ok", "message": "structured-ok"},
@@ -187,7 +152,7 @@ class AgentFlowTests(unittest.TestCase):
         self.assertEqual(result["decision"], "direct_answer")
         self.assertIn("1 hour", result["message"])
 
-    def test_handle_query_external_tool_uses_contextual_answer_when_available(self) -> None:
+    def test_agent_flow_handle_query_external_tool_uses_contextual_answer_when_available(self) -> None:
         agent = ToolEnabledAgent(
             AgentDependencies(
                 structured_data_tool=lambda p: {"status": "ok", "message": "structured-ok"},

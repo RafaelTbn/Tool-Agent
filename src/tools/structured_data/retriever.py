@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import re
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 
 def connect_live_db(config: Dict[str, Any]) -> Any | None:
@@ -36,10 +37,33 @@ def collect_all_candidates(conn: Any, schema: str) -> List[Dict[str, Any]]:
     return candidates
 
 
-def _collect_sla_candidates(conn: Any, schema: str) -> List[Dict[str, Any]]:
-    with conn.cursor() as cur:
-        cur.execute(
-            f"""
+def collect_candidates_by_sources(
+    conn: Any,
+    schema: str,
+    sources: Iterable[str],
+    query_hints: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    collectors: Dict[str, Callable[[Any, str, Optional[Dict[str, Any]]], List[Dict[str, Any]]]] = {
+        "sla_lookup": _collect_sla_candidates,
+        "policies": _collect_policy_candidates,
+        "accounts": _collect_account_candidates,
+        "system_status": _collect_system_status_candidates,
+    }
+
+    candidates: List[Dict[str, Any]] = []
+    for source in sources:
+        collector = collectors.get(source)
+        if collector is not None:
+            candidates.extend(collector(conn, schema, query_hints))
+    return candidates
+
+
+def _collect_sla_candidates(
+    conn: Any,
+    schema: str,
+    query_hints: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    query = f"""
             SELECT
                 service_name,
                 tier,
@@ -50,13 +74,24 @@ def _collect_sla_candidates(conn: Any, schema: str) -> List[Dict[str, Any]]:
                 escalation_available
             FROM {schema}.sla_lookup
             """
-        )
+    params: List[Any] = []
+    service_terms = list((query_hints or {}).get("service_terms", []))
+    if service_terms:
+        query += """
+            WHERE LOWER(service_name) LIKE ANY(%s)
+               OR LOWER(tier) LIKE ANY(%s)
+            """
+        patterns = [f"%{term}%" for term in service_terms]
+        params.extend([patterns, patterns])
+
+    with conn.cursor() as cur:
+        cur.execute(query, params or None)
         rows = cur.fetchall()
 
     return [
-        {
-            "source": "sla_lookup",
-            "match_text": " ".join(
+        _build_candidate(
+            "sla_lookup",
+            " ".join(
                 [
                     str(row[0]),
                     str(row[1]),
@@ -67,7 +102,7 @@ def _collect_sla_candidates(conn: Any, schema: str) -> List[Dict[str, Any]]:
                     "service support plan",
                 ]
             ),
-            "record": {
+            {
                 "service_name": str(row[0]),
                 "tier": str(row[1]),
                 "response_time": str(row[2]),
@@ -76,22 +111,46 @@ def _collect_sla_candidates(conn: Any, schema: str) -> List[Dict[str, Any]]:
                 "support_channels": list(row[5]),
                 "escalation_available": bool(row[6]),
             },
-        }
+        )
         for row in rows
     ]
 
 
-def _collect_policy_candidates(conn: Any, schema: str) -> List[Dict[str, Any]]:
-    with conn.cursor() as cur:
-        cur.execute(
-            f"""
+def _collect_policy_candidates(
+    conn: Any,
+    schema: str,
+    query_hints: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    query = f"""
             SELECT p.policy_id, p.title, p.category, p.description, p.role_scope, pr.rule_text
             FROM {schema}.policies p
             LEFT JOIN {schema}.policy_rules pr
                 ON p.policy_id = pr.policy_id
+            """
+    params: List[Any] = []
+    policy_terms = [
+        term
+        for term in (query_hints or {}).get("policy_terms", [])
+        if term not in {"policy", "policies"}
+    ]
+    if policy_terms:
+        query += """
+            WHERE LOWER(p.title) LIKE ANY(%s)
+               OR LOWER(p.policy_id) LIKE ANY(%s)
+               OR EXISTS (
+                    SELECT 1
+                    FROM unnest(p.role_scope) AS role_name
+                    WHERE LOWER(role_name) = ANY(%s)
+               )
+            """
+        patterns = [f"%{term}%" for term in policy_terms]
+        params.extend([patterns, patterns, policy_terms])
+    query += """
             ORDER BY p.policy_id, pr.rule_order
             """
-        )
+
+    with conn.cursor() as cur:
+        cur.execute(query, params or None)
         rows = cur.fetchall()
 
     grouped: Dict[str, Dict[str, Any]] = {}
@@ -112,9 +171,9 @@ def _collect_policy_candidates(conn: Any, schema: str) -> List[Dict[str, Any]]:
             policy["rules"].append(str(row[5]))
 
     return [
-        {
-            "source": "policies",
-            "match_text": " ".join(
+        _build_candidate(
+            "policies",
+            " ".join(
                 [
                     record["policy_id"],
                     record["title"],
@@ -124,26 +183,37 @@ def _collect_policy_candidates(conn: Any, schema: str) -> List[Dict[str, Any]]:
                     " ".join(record["rules"]),
                 ]
             ),
-            "record": record,
-        }
+            record,
+        )
         for record in grouped.values()
     ]
 
 
-def _collect_account_candidates(conn: Any, schema: str) -> List[Dict[str, Any]]:
-    with conn.cursor() as cur:
-        cur.execute(
-            f"""
+def _collect_account_candidates(
+    conn: Any,
+    schema: str,
+    query_hints: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    query = f"""
             SELECT user_id, name, role, status, service_plan, last_login
             FROM {schema}.accounts
             """
-        )
+    params: List[Any] = []
+    user_ids = list((query_hints or {}).get("user_ids", []))
+    if user_ids:
+        query += """
+            WHERE user_id = ANY(%s)
+            """
+        params.append(user_ids)
+
+    with conn.cursor() as cur:
+        cur.execute(query, params or None)
         rows = cur.fetchall()
 
     return [
-        {
-            "source": "accounts",
-            "match_text": " ".join(
+        _build_candidate(
+            "accounts",
+            " ".join(
                 [
                     "account user status service plan login",
                     str(row[0]),
@@ -154,7 +224,7 @@ def _collect_account_candidates(conn: Any, schema: str) -> List[Dict[str, Any]]:
                     str(row[5]),
                 ]
             ),
-            "record": {
+            {
                 "user_id": str(row[0]),
                 "name": str(row[1]),
                 "role": str(row[2]),
@@ -162,12 +232,16 @@ def _collect_account_candidates(conn: Any, schema: str) -> List[Dict[str, Any]]:
                 "service_plan": str(row[4]),
                 "last_login": str(row[5]),
             },
-        }
+        )
         for row in rows
     ]
 
 
-def _collect_system_status_candidates(conn: Any, schema: str) -> List[Dict[str, Any]]:
+def _collect_system_status_candidates(
+    conn: Any,
+    schema: str,
+    query_hints: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute(
             f"""
@@ -189,12 +263,25 @@ def _collect_system_status_candidates(conn: Any, schema: str) -> List[Dict[str, 
         "last_updated": str(row[4]),
     }
     return [
-        {
-            "source": "system_status",
-            "match_text": (
+        _build_candidate(
+            "system_status",
+            (
                 f"system status health load incidents maintenance operational "
                 f"{record['system_health']} {record['current_load_percentage']}"
             ),
-            "record": record,
-        }
+            record,
+        )
     ]
+
+
+def _build_candidate(source: str, match_text: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "source": source,
+        "match_text": match_text,
+        "match_tokens": _tokenize_match_text(match_text),
+        "record": record,
+    }
+
+
+def _tokenize_match_text(text: str) -> List[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())

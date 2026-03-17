@@ -29,6 +29,7 @@ pip-wheel-metadata/
 .env
 .env.*
 *.local
+.python-version
 
 # IDE/editor files
 .vscode/
@@ -40,3 +41,4 @@ Thumbs.db
 
 # Project-local scratch files
 test.txt
+*.log

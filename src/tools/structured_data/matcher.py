@@ -6,30 +6,8 @@ import re
 from typing import Any, Dict, List
 
 
-STOPWORDS = {
-    "a",
-    "an",
-    "and",
-    "are",
-    "can",
-    "for",
-    "how",
-    "i",
-    "is",
-    "me",
-    "of",
-    "on",
-    "our",
-    "please",
-    "tell",
-    "the",
-    "this",
-    "to",
-    "what",
-    "when",
-    "who",
-    "why",
-}
+STOPWORDS = {"a","an","and","are","can","for","how","i","is","me",
+             "of","on","our","please","tell","the","this","to","what","when","who","why",}
 ROLE_KEYWORDS = {"employee", "manager", "admin", "support"}
 SYSTEM_KEYWORDS = ("system status", "system load", "health", "incidents", "maintenance")
 EXPLICIT_MATCH_SCORE = 100
@@ -41,10 +19,13 @@ def tokenize(text: str) -> List[str]:
 
 
 def match_candidates(query: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    query_tokens = tokenize(query)
+    query_token_set = set(query_tokens)
+    query_phrases = _phrase_windows(query_tokens)
     explicit_matches = _match_explicit_candidates(query, candidates)
     if explicit_matches:
         return explicit_matches
-    return _select_ranked_candidates(query, tokenize(query), candidates)
+    return _select_ranked_candidates(query, query_token_set, query_phrases, candidates)
 
 
 def _match_explicit_candidates(query: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -81,26 +62,39 @@ def _matches_policy(query: str, query_tokens: set[str], record: Dict[str, Any]) 
 
 def _select_ranked_candidates(
     query: str,
-    query_tokens: List[str],
+    query_token_set: set[str],
+    query_phrases: List[str],
     candidates: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     scored = [
         _with_score(candidate, score)
         for candidate in candidates
-        for score in [_score_candidate(query, query_tokens, candidate["match_text"])]
+        for score in [
+            _score_candidate(
+                query,
+                query_token_set,
+                query_phrases,
+                candidate["match_text"],
+            )
+        ]
         if score >= 2
     ]
     scored.sort(key=lambda item: int(item["score"]), reverse=True)
     return deduplicate_candidates(scored[:5])
 
 
-def _score_candidate(query: str, query_tokens: List[str], match_text: str) -> int:
+def _score_candidate(
+    query: str,
+    query_token_set: set[str],
+    query_phrases: List[str],
+    match_text: str,
+) -> int:
     candidate_tokens = set(tokenize(match_text))
-    overlap = sum(1 for token in query_tokens if token in candidate_tokens)
+    overlap = len(query_token_set.intersection(candidate_tokens))
 
     bonus = 0
     lowered_match = match_text.lower()
-    for phrase in _phrase_windows(query_tokens):
+    for phrase in query_phrases:
         if phrase in lowered_match:
             bonus = max(bonus, len(phrase.split()))
 

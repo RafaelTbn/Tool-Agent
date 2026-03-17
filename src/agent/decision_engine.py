@@ -20,20 +20,12 @@ class DecisionEngine:
     behavior deterministic for production simulation requirements.
     """
 
-    _RISK_KEYWORDS = ("delete", "bypass", "drop", "disable security", "wipe", "override", "admin access", "production access", "shutdown")
-    _STRUCTURED_KEYWORDS = ("sla", "policy", "account status", "account", "internal database", "service name", "role",)
-    _EXTERNAL_KEYWORDS = (
-        "system load",
-        "external",
-        "latency",
-        "uptime",
-        "health check",
-        "weather",
-        "cuaca",
-        "temperature",
-        "suhu",
-        "forecast",
-    )
+    _RISK_KEYWORDS = ("delete", "bypass", "drop", "disable security", 
+                      "wipe", "override", "admin access", "production access", "shutdown")
+    _STRUCTURED_KEYWORDS = ("sla", "policy", "account status", "account", 
+                            "internal database", "service name", "role",)
+    _EXTERNAL_KEYWORDS = ("system load","external","latency","uptime","health check",
+                          "weather","cuaca","temperature","suhu","forecast",)
 
     def decide(self, query: str) -> Decision:
         """Return deterministic action based on query content."""
