@@ -42,3 +42,4 @@ Thumbs.db
 # Project-local scratch files
 test.txt
 *.log
+logs/*.jsonl

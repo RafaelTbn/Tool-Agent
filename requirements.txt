@@ -4,5 +4,4 @@
 fastapi
 uvicorn
 pydantic
-requests
 psycopg[binary]

@@ -13,9 +13,9 @@ from src.services import OllamaService, RetryService, TimeoutService
 from src.tools import ExternalAPITool, GuardrailTool, StructuredDataTool, ToolRegistry
 
 
-def build_agent() -> ToolEnabledAgent:
-    """Build fully wired agent with tools, services, and logging."""
-    logger = AgentLogger()
+def build_runtime() -> tuple[ToolEnabledAgent, AgentLogger]:
+    """Build fully wired agent plus logger for API/CLI reuse."""
+    logger = AgentLogger(file_path=os.getenv("AGENT_LOG_FILE", "logs/agent_history.jsonl"))
     retry_service = RetryService()
     timeout_service = TimeoutService()
     ollama_service = OllamaService(
@@ -46,12 +46,18 @@ def build_agent() -> ToolEnabledAgent:
         contextual_answer=ollama_service.answer_with_context,
         logger=logger.log,
     )
-    return ToolEnabledAgent(dependencies=dependencies)
+    return ToolEnabledAgent(dependencies=dependencies), logger
+
+
+def build_agent() -> ToolEnabledAgent:
+    """Build fully wired agent with tools, services, and logging."""
+    agent, _ = build_runtime()
+    return agent
 
 
 def run(query: str) -> dict:
     """Run one query and return structured response."""
-    agent = build_agent()
+    agent, _ = build_runtime()
     return agent.handle_query(query=query)
 
 
